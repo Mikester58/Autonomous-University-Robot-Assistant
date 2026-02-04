@@ -14,7 +14,7 @@ export function loadTheme(): ThemeOption {
 
 // ===== Save theme =====
 export function saveTheme(theme: ThemeOption) {
-  localStorage.setItem(THEME_KEY, theme);
+  localStorage.setItem("arua-theme", theme)
 }
 
 // ===== Apply theme to HTML root =====

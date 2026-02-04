@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 interface User {
@@ -7,21 +7,25 @@ interface User {
 
 interface AuthContextType {
   user: User | null;
-  login: () => void;
+  login: (email: string) => void;
   logout: () => void;
 }
 
-const AuthContext = createContext<AuthContextType>(null!);
+const AuthContext = createContext<AuthContextType>(null as any);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => {
-    const stored = localStorage.getItem("arua-user");
-    return stored ? JSON.parse(stored) : null;
+    try {
+      const stored = localStorage.getItem("arua-user");
+      return stored ? (JSON.parse(stored) as User) : null;
+    } catch {
+      return null;
+    }
   });
 
-  const login = () => {
-    console.log("LOGIN CLICKED ✔");
-    const newUser = { email: "student@tamu.edu" };
+  const login = (email: string) => {
+    const clean = (email || "").trim() || "student@tamu.edu";
+    const newUser: User = { email: clean };
     setUser(newUser);
     localStorage.setItem("arua-user", JSON.stringify(newUser));
   };
@@ -31,12 +35,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("arua-user");
   };
 
-  return (
-    <AuthContext.Provider value={{ user, login, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  const value = useMemo(() => ({ user, login, logout }), [user]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-// ✅ THIS WAS MISSING
 export const useAuth = () => useContext(AuthContext);
