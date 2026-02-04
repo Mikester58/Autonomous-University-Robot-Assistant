@@ -1,0 +1,1 @@
+mock camera frame data placeholder

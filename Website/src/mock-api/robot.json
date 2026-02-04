@@ -1,0 +1,9 @@
+{
+    "battery": 92,
+    "cpuTemp": 46,
+    "ramUsage": 38,
+    "wifiDbm": -58,
+    "uptime": "3h 42m",
+    "motors": "idle",
+    "speed": 1.0
+}

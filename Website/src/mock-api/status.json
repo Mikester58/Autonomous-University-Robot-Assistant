@@ -1,0 +1,7 @@
+{
+    "connected": true,
+    "camera": true,
+    "motors": true,
+    "esp32": true,
+    "jetson": true
+}

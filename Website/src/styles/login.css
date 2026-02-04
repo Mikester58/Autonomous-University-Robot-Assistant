@@ -1,0 +1,77 @@
+/* ============================================================
+   TAMU LOGIN PAGE — Modern Academic Style
+============================================================ */
+
+.login-wrapper {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.login-card {
+    background: var(--card-bg);
+    padding: 2.4rem 2.8rem;
+    border-radius: 16px;
+    border: 1px solid var(--card-border);
+    box-shadow: var(--shadow);
+    text-align: center;
+    width: 360px;
+    animation: fadeIn 0.4s ease-out;
+}
+
+.login-logo {
+    width: 90px;
+    height: 90px;
+    border-radius: 16px;
+    margin-bottom: 1rem;
+    box-shadow: var(--shadow);
+}
+
+.login-title {
+    font-size: 1.7rem;
+    font-weight: 800;
+    margin-bottom: 0.4rem;
+    color: var(--accent);
+}
+
+.login-subtitle {
+    font-size: 0.95rem;
+    opacity: 0.75;
+    margin-bottom: 1.8rem;
+}
+
+/* TAMU Login Button */
+.login-btn {
+    background: var(--accent);
+    color: white;
+    width: 100%;
+    padding: 0.9rem;
+    border-radius: 10px;
+    border: none;
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: 0.25s;
+    box-shadow: var(--shadow);
+}
+
+.login-btn:hover {
+    background: var(--accent-light);
+}
+
+.login-footer {
+    margin-top: 1.8rem;
+    font-size: 0.85rem;
+    opacity: 0.5;
+}
+
+/* Mobile */
+@media (max-width: 420px) {
+    .login-card {
+        width: 90%;
+        padding: 1.8rem;
+    }
+}
