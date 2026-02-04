@@ -1,16 +1,19 @@
-# Website/backend/camera_api.py
 import os
 import time
-import threading
+import json
+import base64
+import hmac
+import hashlib
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 import cv2
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from dotenv import load_dotenv
 
-# Always load Website/.env regardless of where uvicorn is launched from
+# Load .env from Website/.env (one directory above /backend)
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 APP_HOST = os.getenv("CAMERA_API_HOST", "127.0.0.1")
@@ -18,53 +21,103 @@ APP_PORT = int(os.getenv("CAMERA_API_PORT", "9000"))
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_IPS = {ip.strip() for ip in os.getenv("ALLOWED_IPS", "").split(",") if ip.strip()}
+
+# Camera security token (for camera endpoints)
 API_TOKEN = os.getenv("API_TOKEN", "")
 
+# Auth settings
+AUTH_SECRET = os.getenv("AUTH_SECRET", "")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")  # temporary shared password
+AUTH_TOKEN_TTL = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "86400"))  # 24h default
+AUTH_ALLOWED_DOMAINS = [d.strip().lower() for d in os.getenv("AUTH_ALLOWED_DOMAINS", "tamu.edu").split(",") if d.strip()]
+
+# Camera settings
 CAMERA_INDEX = os.getenv("CAMERA_INDEX", "0")
-CAMERA_FPS = int(os.getenv("CAMERA_FPS", "10"))
+CAMERA_FPS = int(os.getenv("CAMERA_FPS", "30"))
 CAMERA_JPEG_QUALITY = int(os.getenv("CAMERA_JPEG_QUALITY", "70"))
 CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "480"))
 
-# ------------------------------------------------------------
-# Security helpers
-# ------------------------------------------------------------
 def get_client_ip(request: Request) -> str:
-    # NOTE: If you later put this behind a reverse proxy/tunnel,
-    # you'd want to validate and possibly use X-Forwarded-For.
     return request.client.host
-
 
 def require_ip_allowlist(request: Request):
     if not ALLOWED_IPS:
-        return  # if empty, allow all (not recommended)
+        return
     ip = get_client_ip(request)
     if ip not in ALLOWED_IPS:
         raise HTTPException(status_code=403, detail=f"IP not allowed: {ip}")
 
-
-def require_bearer_token(request: Request):
+def require_camera_bearer_token(request: Request):
     if not API_TOKEN:
         raise HTTPException(status_code=500, detail="Server missing API_TOKEN")
     auth = request.headers.get("authorization", "")
     if auth != f"Bearer {API_TOKEN}":
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# ---------------------------
+# Auth token (HMAC-signed)
+# ---------------------------
 
-# ------------------------------------------------------------
-# Camera manager (keeps camera open to avoid flicker)
-# ------------------------------------------------------------
-_cam_lock = threading.Lock()
-_cam = None
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
+def _b64url_decode(data: str) -> bytes:
+    pad = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + pad)
 
-def _open_camera_inner():
+def sign_token(payload: Dict[str, Any]) -> str:
+    if not AUTH_SECRET:
+        raise RuntimeError("AUTH_SECRET missing")
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sig = hmac.new(AUTH_SECRET.encode("utf-8"), raw, hashlib.sha256).digest()
+    return f"{_b64url_encode(raw)}.{_b64url_encode(sig)}"
+
+def verify_token(token: str) -> Dict[str, Any]:
+    if not AUTH_SECRET:
+        raise HTTPException(status_code=500, detail="Server missing AUTH_SECRET")
+    try:
+        raw_b64, sig_b64 = token.split(".", 1)
+        raw = _b64url_decode(raw_b64)
+        sig = _b64url_decode(sig_b64)
+        expected = hmac.new(AUTH_SECRET.encode("utf-8"), raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        payload = json.loads(raw.decode("utf-8"))
+        exp = int(payload.get("exp", 0))
+        if exp and time.time() > exp:
+            raise HTTPException(status_code=401, detail="Token expired")
+        return payload
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def require_auth(request: Request) -> Dict[str, Any]:
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    token = auth.replace("Bearer ", "", 1).strip()
+    return verify_token(token)
+
+def domain_allowed(email: str) -> bool:
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return False
+    domain = email.split("@", 1)[1]
+    return domain in AUTH_ALLOWED_DOMAINS
+
+# ---------------------------
+# Camera
+# ---------------------------
+
+def open_camera():
     src = CAMERA_INDEX
-    if src.isdigit():
+    if isinstance(src, str) and src.isdigit():
         src = int(src)
 
-    # Windows: DirectShow is usually the most reliable.
-    # On Jetson/Linux, CAP_DSHOW is ignored; OpenCV will use V4L2.
+    # Windows fix: DirectShow; on Jetson/Linux you can remove CAP_DSHOW
     cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
 
     if not cap.isOpened():
@@ -74,47 +127,9 @@ def _open_camera_inner():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
 
-    # Warm-up
     time.sleep(0.2)
     return cap
 
-
-def get_camera():
-    global _cam
-    with _cam_lock:
-        if _cam is not None and _cam.isOpened():
-            return _cam
-
-        # (Re)open camera
-        _cam = _open_camera_inner()
-        return _cam
-
-
-def read_frame():
-    cap = get_camera()
-
-    # Try multiple reads; prevents intermittent blank frames
-    for _ in range(20):
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            return frame
-        time.sleep(0.05)
-
-    # If it fails, release and try to recover next call
-    global _cam
-    with _cam_lock:
-        try:
-            if _cam is not None:
-                _cam.release()
-        finally:
-            _cam = None
-
-    raise RuntimeError("Failed to read frame from camera")
-
-
-# ------------------------------------------------------------
-# FastAPI app
-# ------------------------------------------------------------
 app = FastAPI()
 
 if ALLOWED_ORIGINS:
@@ -122,56 +137,74 @@ if ALLOWED_ORIGINS:
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
-
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
+# ---------------------------
+# AUTH endpoints
+# ---------------------------
 
-@app.get("/camera/snapshot")
-def snapshot(request: Request):
+@app.post("/auth/login")
+async def auth_login(request: Request):
     require_ip_allowlist(request)
-    require_bearer_token(request)
 
-    try:
-        frame = read_frame()
-        ok, jpg = cv2.imencode(
-            ".jpg",
-            frame,
-            [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
-        )
-        if not ok:
-            raise HTTPException(status_code=500, detail="Failed to encode JPEG")
+    if not AUTH_PASSWORD or not AUTH_SECRET:
+        raise HTTPException(status_code=500, detail="Server missing AUTH_PASSWORD or AUTH_SECRET")
 
-        return Response(content=jpg.tobytes(), media_type="image/jpeg")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = (body.get("password") or "").strip()
 
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email + password required")
+
+    if password != AUTH_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not domain_allowed(email):
+        raise HTTPException(status_code=403, detail="Email domain not allowed")
+
+    now = int(time.time())
+    payload = {
+        "sub": email,
+        "iat": now,
+        "exp": now + AUTH_TOKEN_TTL,
+    }
+    token = sign_token(payload)
+    return {"token": token, "user": {"email": email}, "expires_in": AUTH_TOKEN_TTL}
+
+@app.get("/auth/me")
+def auth_me(request: Request):
+    require_ip_allowlist(request)
+    payload = require_auth(request)
+    return {"user": {"email": payload.get("sub")}, "exp": payload.get("exp")}
+
+# ---------------------------
+# Camera endpoints (keep your token gate here)
+# ---------------------------
 
 @app.get("/camera/stream")
 def stream(request: Request):
     require_ip_allowlist(request)
-    require_bearer_token(request)
-
-    frame_delay = 1.0 / max(CAMERA_FPS, 1)
+    require_camera_bearer_token(request)
 
     def gen():
-        while True:
-            try:
-                frame = read_frame()
-                ok, jpg = cv2.imencode(
-                    ".jpg",
-                    frame,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
-                )
+        cap = open_camera()
+        frame_delay = 1.0 / max(CAMERA_FPS, 1)
+        try:
+            while True:
+                ok, frame = cap.read()
                 if not ok:
-                    time.sleep(frame_delay)
+                    time.sleep(0.02)
+                    continue
+
+                ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY])
+                if not ok:
                     continue
 
                 yield (
@@ -179,11 +212,7 @@ def stream(request: Request):
                     b"Content-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
                 )
                 time.sleep(frame_delay)
-            except Exception:
-                # brief backoff, then continue (allows recovery if camera hiccups)
-                time.sleep(0.2)
+        finally:
+            cap.release()
 
-    return StreamingResponse(
-        gen(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
