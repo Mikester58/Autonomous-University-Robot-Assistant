@@ -23,7 +23,7 @@ if "session_id" not in st.session_state:
 if "rag_system" not in st.session_state:
     st.session_state.rag_system = None
 
-st.title("ECEN 214 Lab Assistant")
+st.title("Autonomous University Robotic Assistant")
 
 # --- System Init ---
 if st.session_state.rag_system is None:
